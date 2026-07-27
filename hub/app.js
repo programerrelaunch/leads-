@@ -264,7 +264,14 @@ function filteredJobs() {
   const q = state.query.trim().toLowerCase();
   return state.jobs
     .filter((j) => (state.filterSource === "all" ? true : j.source === state.filterSource))
-    .filter((j) => (state.filterStatus === "all" ? true : j.status === state.filterStatus))
+    .filter((j) => {
+      if (state.filterStatus === "all") {
+        // When skipping applied, only show open (Saved) jobs in the main list
+        if (state.skipApplied) return j.status === "saved";
+        return true;
+      }
+      return j.status === state.filterStatus;
+    })
     .filter((j) => (state.filterTag === "all" ? true : j.tags.includes(state.filterTag)))
     .filter((j) => {
       if (!q) return true;
@@ -274,6 +281,7 @@ function filteredJobs() {
         j.url.toLowerCase().includes(q)
       );
     })
+    .filter((j) => (state.skipApplied ? !isAlreadyApplied(j.url) || state.filterStatus === "applied" : true))
     .sort((a, b) =>
       (b.scrapedAt || b.createdAt || "").localeCompare(a.scrapedAt || a.createdAt || ""),
     );
@@ -544,15 +552,29 @@ async function runAutoSearch({ silent = false } = {}) {
   render();
 
   try {
-    const data = await window.ApplyHubScraper.scrapeJobs({ query: q, sources });
+    const data = await window.ApplyHubScraper.scrapeJobs({
+      query: q,
+      sources,
+      email: state.accounts.onlinejobs.email || "",
+      password: state.accounts.onlinejobs.password || "",
+      knownAppliedUrls: state.appliedUrls || [],
+      skipApplied: state.skipApplied,
+    });
     const rawJobs = Array.isArray(data.jobs) ? data.jobs : [];
-    const skipped = rawJobs.filter((j) => isAlreadyApplied(j.url)).length;
+    const siteApplied = Array.isArray(data.appliedDetected) ? data.appliedDetected : [];
+    if (siteApplied.length) {
+      markAppliedUrls(siteApplied.map((j) => j.url).filter(Boolean));
+    }
+    const skipped =
+      (data.skippedApplied || siteApplied.length || 0) +
+      rawJobs.filter((j) => isAlreadyApplied(j.url)).length;
     state.searchResults = filterNewJobs(rawJobs);
     state.searchErrors = data.errors || {};
     state.searchMeta = {
       count: state.searchResults.length,
-      scraped: rawJobs.length,
+      scraped: rawJobs.length + siteApplied.length,
       skippedApplied: skipped,
+      authenticated: Boolean(data.authenticated),
       searchedAt: data.searchedAt || new Date().toISOString(),
     };
     state.lastSearchedAt = state.searchMeta.searchedAt;
@@ -565,8 +587,9 @@ async function runAutoSearch({ silent = false } = {}) {
     }
 
     if (!silent) {
+      const authNote = data.authenticated ? " · logged into OnlineJobs" : "";
       showToast(
-        `Scraped ${rawJobs.length} · ${skipped} already applied skipped · +${merged.added} new`,
+        `Found ${state.searchResults.length} open jobs · skipped ${skipped} already applied${authNote}`,
       );
     } else {
       render();
@@ -600,8 +623,8 @@ function renderAccountsPanel() {
     <form class="panel" id="accounts-form">
       <h2 class="font-display" style="margin:0 0 0.75rem;font-size:1.25rem">Account sync</h2>
       <p class="hint">
-        Save your OnlineJobs.ph login in this browser, then sync jobs you’ve already applied to.
-        Scrapes will skip those jobs. Credentials stay in localStorage on your device (not in GitHub).
+        Save OnlineJobs.ph login, then sync or scrape. The app detects jobs marked
+        <strong>Applied</strong> / <strong>Date Applied</strong> on the listing site and hides them from open results.
       </p>
       <label>
         <span>OnlineJobs email</span>
@@ -634,7 +657,7 @@ function renderSearchPanel() {
   return `
     <form class="panel" id="search-form">
       <h2 class="font-display" style="margin:0 0 0.75rem;font-size:1.25rem">Live scrape</h2>
-      <p class="hint">Standalone scraper pulls live posts from OnlineJobs.ph, Indeed, and JobStreet, then saves them into this browser’s local data.</p>
+      <p class="hint">Standalone scraper pulls live posts from OnlineJobs.ph, Indeed, and JobStreet. With your OnlineJobs account saved, it detects the site’s <strong>Applied / Date Applied</strong> status and only shows jobs you haven’t applied to yet.</p>
       <label>
         <span>Keywords</span>
         <input class="field" name="q" value="${escapeHtml(state.searchQuery)}" placeholder="wordpress developer" required />
@@ -663,7 +686,7 @@ function renderSearchPanel() {
       </label>
       <label class="check auto-refresh">
         <input type="checkbox" id="skip-applied" ${state.skipApplied ? "checked" : ""} />
-        <span>Only scrape jobs I haven’t applied to yet</span>
+        <span>Only show jobs I haven’t applied to yet (hide Applied / Date Applied)</span>
       </label>
       <label class="check auto-refresh">
         <input type="checkbox" id="auto-refresh" ${state.autoRefresh ? "checked" : ""} />
@@ -676,7 +699,9 @@ function renderSearchPanel() {
         state.searchMeta
           ? `<p class="hint" style="margin-top:0.75rem;margin-bottom:0">Last scrape: ${escapeHtml(
               new Date(state.searchMeta.searchedAt).toLocaleString(),
-            )} · ${state.searchMeta.count} new · skipped ${state.searchMeta.skippedApplied || 0} already applied · ${state.jobs.length} stored</p>`
+            )} · ${state.searchMeta.count} open · skipped ${state.searchMeta.skippedApplied || 0} already applied${
+              state.searchMeta.authenticated ? " · OnlineJobs logged in" : ""
+            } · ${state.jobs.filter((j) => j.status === "saved").length} saved open</p>`
           : ""
       }
       ${

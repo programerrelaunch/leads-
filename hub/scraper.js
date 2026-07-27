@@ -36,6 +36,17 @@
     return [...new Set(tags)];
   }
 
+  function looksApplied(block = "") {
+    const text = String(block);
+    return (
+      /Date\s*Applied/i.test(text) ||
+      /Already\s+Applied/i.test(text) ||
+      />\s*Applied\s*</i.test(text) ||
+      /class="[^"]*applied[^"]*"/i.test(text) ||
+      /btn[^>]*>\s*Applied\s*</i.test(text)
+    );
+  }
+
   async function fetchText(url) {
     const proxies = [
       (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
@@ -71,24 +82,48 @@
 
   function parseOnlineJobs(html, query) {
     const jobs = [];
+    const applied = [];
     const seen = new Set();
     const re =
-      /href="(\/jobseekers\/job\/[^"]+)"[\s\S]{0,120}?jobpost-cat-box[\s\S]{0,2500}?<h4[^>]*>([\s\S]*?)<\/h4>/gi;
+      /href="(\/jobseekers\/job\/[^"]+)"[\s\S]{0,120}?jobpost-cat-box([\s\S]{0,3500}?)(?=<a href="\/jobseekers\/job\/|$)/gi;
     let m;
-    while ((m = re.exec(html)) && jobs.length < 40) {
+    while ((m = re.exec(html)) && jobs.length + applied.length < 50) {
       const href = decodeHtml(m[1]);
       if (seen.has(href)) continue;
       seen.add(href);
-      const title = clean(m[2]) || query;
-      jobs.push({
+      const block = m[2] || "";
+      const titleMatch = block.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
+      const title = clean(titleMatch ? titleMatch[1] : "") || query;
+      const job = {
         title,
         company: "OnlineJobs.ph employer",
         url: `https://www.onlinejobs.ph${href}`,
         source: "onlinejobs",
         tags: suggestTags(title),
-      });
+        siteApplied: looksApplied(block),
+      };
+      if (job.siteApplied) applied.push(job);
+      else jobs.push(job);
     }
-    return jobs;
+    if (!jobs.length && !applied.length) {
+      const simple =
+        /href="(\/jobseekers\/job\/[^"]+)"[\s\S]{0,120}?jobpost-cat-box[\s\S]{0,2500}?<h4[^>]*>([\s\S]*?)<\/h4>/gi;
+      while ((m = simple.exec(html)) && jobs.length < 40) {
+        const href = decodeHtml(m[1]);
+        if (seen.has(href)) continue;
+        seen.add(href);
+        const title = clean(m[2]) || query;
+        jobs.push({
+          title,
+          company: "OnlineJobs.ph employer",
+          url: `https://www.onlinejobs.ph${href}`,
+          source: "onlinejobs",
+          tags: suggestTags(title),
+          siteApplied: false,
+        });
+      }
+    }
+    return { jobs, applied };
   }
 
   function parseIndeed(html, query) {
@@ -124,9 +159,10 @@
         url: `https://ph.indeed.com/viewjob?jk=${jk}`,
         source: "indeed",
         tags: suggestTags(title),
+        siteApplied: false,
       });
     }
-    return jobs;
+    return { jobs, applied: [] };
   }
 
   function parseJobStreet(html, query) {
@@ -152,9 +188,10 @@
         url: `https://ph.jobstreet.com${path}`,
         source: "jobstreet",
         tags: suggestTags(title),
+        siteApplied: false,
       });
     }
-    return jobs;
+    return { jobs, applied: [] };
   }
 
   async function searchSource(source, query) {
@@ -164,13 +201,13 @@
         const html = await fetchText(
           `https://www.onlinejobs.ph/jobseekers/jobsearch?jobkeyword=${q}`,
         );
-        return { source, jobs: parseOnlineJobs(html, query), error: null };
+        return { source, ...parseOnlineJobs(html, query), error: null };
       }
       if (source === "indeed") {
         const html = await fetchText(
           `https://ph.indeed.com/jobs?q=${q}&l=Philippines`,
         );
-        return { source, jobs: parseIndeed(html, query), error: null };
+        return { source, ...parseIndeed(html, query), error: null };
       }
       if (source === "jobstreet") {
         const slug = query
@@ -201,35 +238,111 @@
           }
         }
         if (!html) throw lastError || new Error("JobStreet fetch failed");
-        const jobs = parseJobStreet(html, query);
-        if (!jobs.length) {
+        const parsed = parseJobStreet(html, query);
+        if (!parsed.jobs.length) {
           return {
             source,
             jobs: [],
+            applied: [],
             error: "No JobStreet listings parsed",
           };
         }
-        return { source, jobs, error: null };
+        return { source, ...parsed, error: null };
       }
-      return { source, jobs: [], error: "Unknown source" };
+      return { source, jobs: [], applied: [], error: "Unknown source" };
     } catch (err) {
-      return { source, jobs: [], error: err.message || String(err) };
+      return { source, jobs: [], applied: [], error: err.message || String(err) };
     }
   }
 
-  async function scrapeJobs({ query, sources }) {
+  async function scrapeViaApi({
+    query,
+    sources,
+    email,
+    password,
+    knownAppliedUrls,
+    skipApplied,
+  }) {
+    const res = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        q: query,
+        sources: sources.join(","),
+        email: email || "",
+        password: password || "",
+        knownAppliedUrls: knownAppliedUrls || [],
+        skipApplied: skipApplied !== false,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Search API failed (${res.status})`);
+    }
+    return res.json();
+  }
+
+  async function scrapeJobs({
+    query,
+    sources,
+    email,
+    password,
+    knownAppliedUrls,
+    skipApplied,
+  }) {
     const list = sources.length
       ? sources
       : ["onlinejobs", "indeed", "jobstreet"];
+
+    // Prefer authenticated server search when OnlineJobs credentials exist
+    if (email && password) {
+      try {
+        const data = await scrapeViaApi({
+          query,
+          sources: list,
+          email,
+          password,
+          knownAppliedUrls,
+          skipApplied,
+        });
+        return {
+          query,
+          count: data.count || (data.jobs || []).length,
+          jobs: (data.jobs || []).map((j) => ({
+            ...j,
+            scrapedAt: new Date().toISOString(),
+          })),
+          appliedDetected: data.appliedDetected || [],
+          skippedApplied: data.skippedApplied || 0,
+          errors: data.errors || {},
+          authenticated: Boolean(data.authenticated),
+          searchedAt: data.searchedAt || new Date().toISOString(),
+        };
+      } catch (err) {
+        // fall through to browser scrape
+        var authError = err.message || String(err);
+      }
+    }
+
     const results = await Promise.all(list.map((s) => searchSource(s, query)));
     const jobs = [];
+    const appliedDetected = [];
     const seen = new Set();
     const errors = {};
+    if (authError) errors.onlinejobs_auth = authError;
+
     for (const result of results) {
       if (result.error) errors[result.source] = result.error;
+      for (const job of result.applied || []) {
+        appliedDetected.push(job);
+      }
       for (const job of result.jobs) {
         if (seen.has(job.url)) continue;
         seen.add(job.url);
+        if (job.siteApplied) {
+          appliedDetected.push(job);
+          continue;
+        }
         jobs.push({
           ...job,
           scrapedAt: new Date().toISOString(),
@@ -237,25 +350,28 @@
       }
     }
 
-    // Optional server fallback if browser proxies got little/nothing
+    // Server fallback without auth if browser scrape is thin
     if (jobs.length < 3) {
       try {
-        const params = new URLSearchParams({
-          q: query,
-          sources: list.join(","),
+        const data = await scrapeViaApi({
+          query,
+          sources: list,
+          email: email || "",
+          password: password || "",
+          knownAppliedUrls,
+          skipApplied,
         });
-        const res = await fetch(`/api/search?${params.toString()}`);
-        if (res.ok) {
-          const data = await res.json();
-          for (const job of data.jobs || []) {
-            if (seen.has(job.url)) continue;
-            seen.add(job.url);
-            jobs.push({ ...job, scrapedAt: new Date().toISOString() });
-          }
-          Object.assign(errors, data.errors || {});
+        for (const job of data.jobs || []) {
+          if (seen.has(job.url)) continue;
+          seen.add(job.url);
+          jobs.push({ ...job, scrapedAt: new Date().toISOString() });
         }
+        for (const job of data.appliedDetected || []) {
+          appliedDetected.push(job);
+        }
+        Object.assign(errors, data.errors || {});
       } catch {
-        /* standalone mode can ignore API */
+        /* ignore */
       }
     }
 
@@ -263,7 +379,10 @@
       query,
       count: jobs.length,
       jobs,
+      appliedDetected,
+      skippedApplied: appliedDetected.length,
       errors,
+      authenticated: false,
       searchedAt: new Date().toISOString(),
     };
   }
@@ -271,5 +390,6 @@
   global.ApplyHubScraper = {
     scrapeJobs,
     suggestTags,
+    looksApplied,
   };
 })(window);
