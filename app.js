@@ -156,7 +156,7 @@ function markAppliedUrls(urls) {
       (j) => normalizeJobUrl(j.url) === normalizeJobUrl(url),
     );
     if (existing) {
-      existing.status = existing.status === "saved" ? "applied" : existing.status;
+      if (existing.status === "saved") existing.status = "applied";
       existing.appliedAt = existing.appliedAt || new Date().toISOString();
     }
   }
@@ -355,6 +355,15 @@ async function applyPrepFromResult(result) {
   if (job) await applyPrep(job);
 }
 
+function getApplyAllCandidates(from = "saved") {
+  if (from === "results") {
+    // Use what's on screen, but skip already-applied
+    return (state.searchResults || []).filter((j) => j?.url && !isAlreadyApplied(j.url));
+  }
+  // Same rule as the "ready to apply" counter: status Saved in current filters
+  return filteredJobs().filter((j) => j.status === "saved");
+}
+
 /**
  * One-click apply prep for many jobs: copies the same cover letter once,
  * opens each listing, and marks them applied in browser storage.
@@ -363,7 +372,18 @@ async function applyPrepFromResult(result) {
 async function applyToAll(jobs, { confirmLarge = true } = {}) {
   const list = (jobs || []).filter((j) => j && j.url);
   if (!list.length) {
-    showToast("No jobs to apply to");
+    const savedCount = filteredJobs().filter((j) => j.status === "saved").length;
+    const resultsCount = (state.searchResults || []).length;
+    const appliedTracked = state.appliedUrls.length;
+    if (resultsCount > 0 || savedCount === 0) {
+      showToast(
+        appliedTracked
+          ? "Nothing left to apply — these jobs are already marked applied. Scrape again or clear Applied filter."
+          : "No jobs ready to apply. Scrape live jobs first (status must be Saved).",
+      );
+    } else {
+      showToast("No Saved jobs in the current filter to apply to");
+    }
     return;
   }
 
@@ -402,18 +422,22 @@ async function applyToAll(jobs, { confirmLarge = true } = {}) {
 
   const now = new Date().toISOString();
   state.jobs = state.jobs.map((j) =>
-    urls.includes(j.url)
+    urls.some((url) => normalizeJobUrl(url) === normalizeJobUrl(j.url))
       ? {
           ...j,
-          status: j.status === "saved" || j.status === "applied" ? "applied" : j.status,
+          status: "applied",
           appliedAt: j.appliedAt || now,
         }
       : j,
   );
   markAppliedUrls(urls);
+  // Keep results list in sync so Apply to all doesn't target stale rows
+  state.searchResults = filterNewJobs(state.searchResults);
   save();
   showToast(
-    `Cover letter copied · opened ${opened}/${urls.length} jobs — paste the same letter on each form`,
+    opened
+      ? `Cover letter copied · opened ${opened}/${urls.length} jobs — paste the same letter on each form`
+      : `Cover letter copied · ${urls.length} marked applied, but the browser blocked pop-ups. Allow pop-ups and try again.`,
   );
   render();
 }
@@ -472,6 +496,7 @@ async function syncOnlineJobsApplied() {
       }
     }
     state.lastAppliedSync = data.syncedAt || new Date().toISOString();
+    state.searchResults = filterNewJobs(state.searchResults);
     save();
     showToast(
       `Synced ${urls.length} applied OnlineJobs posts · ${added} new marked applied`,
@@ -690,7 +715,9 @@ function renderResults() {
       <p class="font-display" style="margin:0;font-size:1.25rem">${state.searchResults.length} live posts</p>
       <div class="toolbar-actions">
         <button type="button" class="btn-secondary" id="save-all-results" style="width:auto">Save all to browser</button>
-        <button type="button" class="btn-primary" id="apply-all-results" style="width:auto">Apply to all</button>
+        <button type="button" class="btn-primary" id="apply-all-results" style="width:auto" ${getApplyAllCandidates("results").length ? "" : "disabled"}>
+          Apply to all (${getApplyAllCandidates("results").length})
+        </button>
       </div>
     </div>
     <ul class="job-list">
@@ -725,7 +752,7 @@ function renderResults() {
 
 function renderSavedSection() {
   const jobs = filteredJobs();
-  const pending = jobs.filter((j) => j.status === "saved");
+  const pending = getApplyAllCandidates("saved");
   return `
     <div class="results-toolbar saved-toolbar">
       <p class="hint" style="margin:0">${pending.length} ready to apply (status: Saved)</p>
@@ -978,14 +1005,11 @@ function bindEvents() {
   });
 
   document.getElementById("apply-all-results")?.addEventListener("click", () => {
-    applyToAll(filterNewJobs(state.searchResults));
+    applyToAll(getApplyAllCandidates("results"));
   });
 
   document.getElementById("apply-all-saved")?.addEventListener("click", () => {
-    const pending = filteredJobs().filter(
-      (j) => j.status === "saved" && !isAlreadyApplied(j.url),
-    );
-    applyToAll(pending);
+    applyToAll(getApplyAllCandidates("saved"));
   });
 
   document.querySelectorAll(".result-save").forEach((btn) => {
