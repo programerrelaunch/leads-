@@ -101,12 +101,72 @@ const state = {
   autoRefresh: true,
   lastSearchedAt: null,
   autoSaveFeed: true,
+  skipApplied: true,
+  appliedUrls: [],
+  accounts: {
+    onlinejobs: { email: "", password: "" },
+  },
+  syncLoading: false,
+  lastAppliedSync: null,
 };
 
 let autoTimer = null;
 
 function uid() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function normalizeJobUrl(url) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    u.search = "";
+    let host = u.hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "v2.onlinejobs.ph") host = "onlinejobs.ph";
+    const path = u.pathname.replace(/\/+$/, "");
+    return `${host}${path}`.toLowerCase();
+  } catch {
+    return String(url || "").trim().toLowerCase();
+  }
+}
+
+function isAlreadyApplied(url) {
+  const key = normalizeJobUrl(url);
+  if (state.appliedUrls.some((u) => normalizeJobUrl(u) === key)) return true;
+  return state.jobs.some(
+    (j) =>
+      normalizeJobUrl(j.url) === key &&
+      ["applied", "replied", "closed"].includes(j.status),
+  );
+}
+
+function markAppliedUrls(urls) {
+  const set = new Set(state.appliedUrls.map(normalizeJobUrl));
+  let added = 0;
+  for (const url of urls) {
+    const key = normalizeJobUrl(url);
+    if (!key || set.has(key)) continue;
+    set.add(key);
+    state.appliedUrls.push(url);
+    added += 1;
+  }
+
+  for (const url of urls) {
+    const existing = state.jobs.find(
+      (j) => normalizeJobUrl(j.url) === normalizeJobUrl(url),
+    );
+    if (existing) {
+      existing.status = existing.status === "saved" ? "applied" : existing.status;
+      existing.appliedAt = existing.appliedAt || new Date().toISOString();
+    }
+  }
+  save();
+  return added;
+}
+
+function filterNewJobs(jobs) {
+  if (!state.skipApplied) return jobs || [];
+  return (jobs || []).filter((j) => !isAlreadyApplied(j.url));
 }
 
 function detectSource(url) {
@@ -149,8 +209,17 @@ function load() {
     }
     if (typeof parsed.autoRefresh === "boolean") state.autoRefresh = parsed.autoRefresh;
     if (typeof parsed.autoSaveFeed === "boolean") state.autoSaveFeed = parsed.autoSaveFeed;
+    if (typeof parsed.skipApplied === "boolean") state.skipApplied = parsed.skipApplied;
     if (parsed.lastSearchedAt) state.lastSearchedAt = parsed.lastSearchedAt;
+    if (parsed.lastAppliedSync) state.lastAppliedSync = parsed.lastAppliedSync;
     if (Array.isArray(parsed.searchResults)) state.searchResults = parsed.searchResults;
+    if (Array.isArray(parsed.appliedUrls)) state.appliedUrls = parsed.appliedUrls;
+    if (parsed.accounts?.onlinejobs) {
+      state.accounts.onlinejobs = {
+        email: parsed.accounts.onlinejobs.email || "",
+        password: parsed.accounts.onlinejobs.password || "",
+      };
+    }
   } catch {
     /* ignore */
   }
@@ -166,8 +235,17 @@ function save() {
       searchSources: state.searchSources,
       autoRefresh: state.autoRefresh,
       autoSaveFeed: state.autoSaveFeed,
+      skipApplied: state.skipApplied,
       lastSearchedAt: state.lastSearchedAt,
+      lastAppliedSync: state.lastAppliedSync,
       searchResults: state.searchResults,
+      appliedUrls: state.appliedUrls,
+      accounts: {
+        onlinejobs: {
+          email: state.accounts.onlinejobs.email || "",
+          password: state.accounts.onlinejobs.password || "",
+        },
+      },
       savedAt: new Date().toISOString(),
     }),
   );
@@ -265,6 +343,7 @@ async function applyPrep(job, { quiet = false } = {}) {
     );
     save();
     if (!quiet) showToast("Cover letter copied — job opened");
+    markAppliedUrls([job.url]);
   } catch {
     if (!quiet) showToast("Could not copy — check clipboard permission");
   }
@@ -331,11 +410,78 @@ async function applyToAll(jobs, { confirmLarge = true } = {}) {
         }
       : j,
   );
+  markAppliedUrls(urls);
   save();
   showToast(
     `Cover letter copied · opened ${opened}/${urls.length} jobs — paste the same letter on each form`,
   );
   render();
+}
+
+async function syncOnlineJobsApplied() {
+  const email = state.accounts.onlinejobs.email.trim();
+  const password = state.accounts.onlinejobs.password;
+  if (!email || !password) {
+    showToast("Enter OnlineJobs email and password first");
+    return;
+  }
+
+  state.syncLoading = true;
+  render();
+  try {
+    const res = await fetch("/api/applied", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: "onlinejobs",
+        email,
+        password,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `Sync failed (${res.status})`);
+    }
+    const urls = (data.applied || []).map((j) => j.url).filter(Boolean);
+    const added = markAppliedUrls(urls);
+
+    // Upsert applied jobs into browser list
+    for (const job of data.applied || []) {
+      if (!job.url) continue;
+      const existing = state.jobs.find(
+        (j) => normalizeJobUrl(j.url) === normalizeJobUrl(job.url),
+      );
+      if (existing) {
+        existing.status = "applied";
+        existing.appliedAt = existing.appliedAt || new Date().toISOString();
+        existing.title = job.title || existing.title;
+      } else {
+        state.jobs.unshift({
+          id: uid(),
+          title: job.title || "Applied OnlineJobs role",
+          company: "OnlineJobs.ph employer",
+          url: job.url,
+          source: "onlinejobs",
+          tags: suggestTags(job.title || ""),
+          status: "applied",
+          notes: "Synced from OnlineJobs account",
+          createdAt: new Date().toISOString(),
+          appliedAt: new Date().toISOString(),
+          scrapedAt: new Date().toISOString(),
+        });
+      }
+    }
+    state.lastAppliedSync = data.syncedAt || new Date().toISOString();
+    save();
+    showToast(
+      `Synced ${urls.length} applied OnlineJobs posts · ${added} new marked applied`,
+    );
+  } catch (err) {
+    showToast(err.message || "Applied sync failed");
+  } finally {
+    state.syncLoading = false;
+    render();
+  }
 }
 
 function escapeHtml(str) {
@@ -374,10 +520,14 @@ async function runAutoSearch({ silent = false } = {}) {
 
   try {
     const data = await window.ApplyHubScraper.scrapeJobs({ query: q, sources });
-    state.searchResults = Array.isArray(data.jobs) ? data.jobs : [];
+    const rawJobs = Array.isArray(data.jobs) ? data.jobs : [];
+    const skipped = rawJobs.filter((j) => isAlreadyApplied(j.url)).length;
+    state.searchResults = filterNewJobs(rawJobs);
     state.searchErrors = data.errors || {};
     state.searchMeta = {
-      count: data.count || state.searchResults.length,
+      count: state.searchResults.length,
+      scraped: rawJobs.length,
+      skippedApplied: skipped,
       searchedAt: data.searchedAt || new Date().toISOString(),
     };
     state.lastSearchedAt = state.searchMeta.searchedAt;
@@ -391,7 +541,7 @@ async function runAutoSearch({ silent = false } = {}) {
 
     if (!silent) {
       showToast(
-        `Scraped ${state.searchResults.length} posts · +${merged.added} new in browser`,
+        `Scraped ${rawJobs.length} · ${skipped} already applied skipped · +${merged.added} new`,
       );
     } else {
       render();
@@ -416,6 +566,42 @@ function syncAutoRefresh() {
       runAutoSearch({ silent: true });
     }, 10 * 60 * 1000);
   }
+}
+
+function renderAccountsPanel() {
+  const email = state.accounts.onlinejobs.email || "";
+  const password = state.accounts.onlinejobs.password || "";
+  return `
+    <form class="panel" id="accounts-form">
+      <h2 class="font-display" style="margin:0 0 0.75rem;font-size:1.25rem">Account sync</h2>
+      <p class="hint">
+        Save your OnlineJobs.ph login in this browser, then sync jobs you’ve already applied to.
+        Scrapes will skip those jobs. Credentials stay in localStorage on your device (not in GitHub).
+      </p>
+      <label>
+        <span>OnlineJobs email</span>
+        <input class="field" name="email" type="email" value="${escapeHtml(email)}" placeholder="you@email.com" required />
+      </label>
+      <label>
+        <span>OnlineJobs password</span>
+        <input class="field" name="password" type="password" value="${escapeHtml(password)}" placeholder="••••••••" required />
+      </label>
+      <p class="hint">Indeed / JobStreet applied detection uses this app’s local Applied status (Apply prep / Apply to all).</p>
+      <button class="btn-primary" type="submit" ${state.syncLoading ? "disabled" : ""}>
+        ${state.syncLoading ? "Syncing applied jobs…" : "Login & sync applied jobs"}
+      </button>
+      <button class="btn-secondary" type="button" id="clear-credentials" style="margin-top:0.5rem">
+        Clear saved credentials
+      </button>
+      ${
+        state.lastAppliedSync
+          ? `<p class="hint" style="margin-top:0.75rem;margin-bottom:0">Last sync: ${escapeHtml(
+              new Date(state.lastAppliedSync).toLocaleString(),
+            )} · ${state.appliedUrls.length} applied URLs tracked</p>`
+          : `<p class="hint" style="margin-top:0.75rem;margin-bottom:0">${state.appliedUrls.length} applied URLs tracked locally</p>`
+      }
+    </form>
+  `;
 }
 
 function renderSearchPanel() {
@@ -451,6 +637,10 @@ function renderSearchPanel() {
         <span>Auto-save scraped jobs to browser storage</span>
       </label>
       <label class="check auto-refresh">
+        <input type="checkbox" id="skip-applied" ${state.skipApplied ? "checked" : ""} />
+        <span>Only scrape jobs I haven’t applied to yet</span>
+      </label>
+      <label class="check auto-refresh">
         <input type="checkbox" id="auto-refresh" ${state.autoRefresh ? "checked" : ""} />
         <span>Auto-scrape every 10 minutes</span>
       </label>
@@ -461,7 +651,7 @@ function renderSearchPanel() {
         state.searchMeta
           ? `<p class="hint" style="margin-top:0.75rem;margin-bottom:0">Last scrape: ${escapeHtml(
               new Date(state.searchMeta.searchedAt).toLocaleString(),
-            )} · ${state.searchMeta.count} results · ${state.jobs.length} stored in browser</p>`
+            )} · ${state.searchMeta.count} new · skipped ${state.searchMeta.skippedApplied || 0} already applied · ${state.jobs.length} stored</p>`
           : ""
       }
       ${
@@ -637,12 +827,15 @@ function render() {
       <aside>
         <div class="tabs">
           <button type="button" data-panel="search" class="${state.panel === "search" ? "active" : ""}">Live scrape</button>
+          <button type="button" data-panel="accounts" class="${state.panel === "accounts" ? "active" : ""}">Account</button>
           <button type="button" data-panel="jobs" class="${state.panel === "jobs" ? "active" : ""}">Manual add</button>
           <button type="button" data-panel="letter" class="${state.panel === "letter" ? "active" : ""}">Cover letter</button>
         </div>
         ${
           state.panel === "search"
             ? renderSearchPanel()
+            : state.panel === "accounts"
+              ? renderAccountsPanel()
             : state.panel === "jobs"
               ? `
           <form class="panel" id="add-form">
@@ -736,6 +929,38 @@ function bindEvents() {
     });
   }
 
+  const skipApplied = document.getElementById("skip-applied");
+  if (skipApplied) {
+    skipApplied.addEventListener("change", () => {
+      state.skipApplied = skipApplied.checked;
+      save();
+      showToast(
+        state.skipApplied
+          ? "Will skip already-applied jobs"
+          : "Showing all scraped jobs",
+      );
+    });
+  }
+
+  const accountsForm = document.getElementById("accounts-form");
+  if (accountsForm) {
+    accountsForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const data = new FormData(accountsForm);
+      state.accounts.onlinejobs.email = String(data.get("email") || "").trim();
+      state.accounts.onlinejobs.password = String(data.get("password") || "");
+      save();
+      syncOnlineJobsApplied();
+    });
+  }
+
+  document.getElementById("clear-credentials")?.addEventListener("click", () => {
+    state.accounts.onlinejobs = { email: "", password: "" };
+    save();
+    showToast("Credentials cleared from this browser");
+    render();
+  });
+
   const autoRefresh = document.getElementById("auto-refresh");
   if (autoRefresh) {
     autoRefresh.addEventListener("change", () => {
@@ -753,11 +978,13 @@ function bindEvents() {
   });
 
   document.getElementById("apply-all-results")?.addEventListener("click", () => {
-    applyToAll(state.searchResults);
+    applyToAll(filterNewJobs(state.searchResults));
   });
 
   document.getElementById("apply-all-saved")?.addEventListener("click", () => {
-    const pending = filteredJobs().filter((j) => j.status === "saved");
+    const pending = filteredJobs().filter(
+      (j) => j.status === "saved" && !isAlreadyApplied(j.url),
+    );
     applyToAll(pending);
   });
 

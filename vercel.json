@@ -3,7 +3,8 @@
   "framework": null,
   "cleanUrls": true,
   "rewrites": [
-    { "source": "/api/search", "destination": "/api/search.js" }
+    { "source": "/api/search", "destination": "/api/search.js" },
+    { "source": "/api/applied", "destination": "/api/applied.js" }
   ],
   "headers": [
     {
