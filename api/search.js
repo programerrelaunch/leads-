@@ -36,18 +36,36 @@ function decodeHtml(html = "") {
 }
 
 async function fetchText(url) {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": UA,
-      Accept: "text/html,application/xhtml+xml",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-    redirect: "follow",
-  });
-  if (!res.ok) {
-    throw new Error(`Fetch failed ${res.status} for ${url}`);
+  const headers = {
+    "User-Agent": UA,
+    Accept: "text/html,application/xhtml+xml",
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+
+  const tryUrls = [
+    url,
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  ];
+
+  let lastError = null;
+  for (const candidate of tryUrls) {
+    try {
+      const res = await fetch(candidate, {
+        headers,
+        redirect: "follow",
+      });
+      if (!res.ok) {
+        lastError = new Error(`Fetch failed ${res.status} for ${candidate}`);
+        continue;
+      }
+      const text = await res.text();
+      if (text && text.length > 500) return text;
+      lastError = new Error(`Empty response for ${candidate}`);
+    } catch (err) {
+      lastError = err;
+    }
   }
-  return res.text();
+  throw lastError || new Error(`Fetch failed for ${url}`);
 }
 
 function parseOnlineJobs(html, query) {
@@ -206,7 +224,12 @@ module.exports = async function handler(req, res) {
   }
 
   const url = new URL(req.url, "http://localhost");
-  const query = (url.searchParams.get("q") || "wordpress developer").trim();
+  let query = (url.searchParams.get("q") || "wordpress developer").trim();
+  try {
+    query = decodeURIComponent(query.replace(/\+/g, " ")).trim();
+  } catch {
+    /* already decoded */
+  }
   const sourcesParam = (url.searchParams.get("sources") || "onlinejobs,indeed,jobstreet")
     .split(",")
     .map((s) => s.trim().toLowerCase())
