@@ -1,31 +1,31 @@
 # Apply Hub
 
-Personal job application tracker for WordPress / web developer openings.
+Standalone web app that scrapes live WordPress / web developer job feeds and stores them in your browser.
 
-## What it does
+## Sources
 
-- **Auto search** active WordPress / web developer posts from OnlineJobs.ph, Indeed, and JobStreet
-- Optional auto-refresh every 10 minutes
-- Save results or **Apply prep** (copies cover letter + opens the job page)
-- Manual URL add still available
-- Track status: Saved → Applied → Replied → Closed
+- OnlineJobs.ph
+- Indeed (Philippines)
+- JobStreet
 
-Search runs through `/api/search` (Vercel serverless). Application submit still happens on the job site itself.
+## Features
 
-## Quick start (no install)
+- Client-side live scrape (CORS proxies) with optional `/api/search` fallback on Vercel
+- Auto-save scraped jobs into `localStorage`
+- Optional auto-scrape every 10 minutes
+- Apply prep: copy cover letter + open job page
+- Works as a static site (`hub/`)
+
+## Run locally
 
 ```bash
 cd hub
 python -m http.server 5173
 ```
 
-Open [http://localhost:5173](http://localhost:5173).
+Open http://localhost:5173
 
-## Next.js version (optional)
+## Deploy
 
-```bash
-npm install
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
+GitHub: https://github.com/programerrelaunch/leads-  
+Live: https://leads-chi-two.vercel.app

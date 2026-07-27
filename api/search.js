@@ -44,25 +44,31 @@ async function fetchText(url) {
 
   const tryUrls = [
     url,
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
   ];
 
   let lastError = null;
   for (const candidate of tryUrls) {
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
       const res = await fetch(candidate, {
         headers,
         redirect: "follow",
+        signal: controller.signal,
       });
+      clearTimeout(timer);
       if (!res.ok) {
         lastError = new Error(`Fetch failed ${res.status} for ${candidate}`);
         continue;
       }
       const text = await res.text();
-      if (text && text.length > 500) return text;
+      if (text && text.length > 800) return text;
       lastError = new Error(`Empty response for ${candidate}`);
     } catch (err) {
-      lastError = err;
+      lastError = err.name === "AbortError" ? new Error(`Timeout for ${candidate}`) : err;
     }
   }
   throw lastError || new Error(`Fetch failed for ${url}`);
@@ -206,7 +212,15 @@ async function searchSource(source, query) {
         }
       }
       if (!html) throw lastError || new Error("JobStreet fetch failed");
-      return { source, jobs: parseJobStreet(html, query), error: null };
+      const jobs = parseJobStreet(html, query);
+      if (!jobs.length) {
+        return {
+          source,
+          jobs: [],
+          error: "No JobStreet listings parsed (site may be blocking bots)",
+        };
+      }
+      return { source, jobs, error: null };
     }
     return { source, jobs: [], error: "Unknown source" };
   } catch (err) {

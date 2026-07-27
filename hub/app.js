@@ -98,8 +98,9 @@ const state = {
   searchErrors: {},
   searchLoading: false,
   searchMeta: null,
-  autoRefresh: false,
+  autoRefresh: true,
   lastSearchedAt: null,
+  autoSaveFeed: true,
 };
 
 let autoTimer = null;
@@ -121,6 +122,9 @@ function detectSource(url) {
 }
 
 function suggestTags(title) {
+  if (window.ApplyHubScraper?.suggestTags) {
+    return window.ApplyHubScraper.suggestTags(title);
+  }
   const t = title.toLowerCase();
   const tags = [];
   if (/wordpress|wp\b|divi|woocommerce/.test(t)) tags.push("wordpress");
@@ -140,8 +144,13 @@ function load() {
     state.coverLetter = parsed.coverLetter || DEFAULT_COVER_LETTER;
     state.jobs = Array.isArray(parsed.jobs) ? parsed.jobs : [];
     if (parsed.searchQuery) state.searchQuery = parsed.searchQuery;
-    if (parsed.searchSources) state.searchSources = { ...state.searchSources, ...parsed.searchSources };
+    if (parsed.searchSources) {
+      state.searchSources = { ...state.searchSources, ...parsed.searchSources };
+    }
     if (typeof parsed.autoRefresh === "boolean") state.autoRefresh = parsed.autoRefresh;
+    if (typeof parsed.autoSaveFeed === "boolean") state.autoSaveFeed = parsed.autoSaveFeed;
+    if (parsed.lastSearchedAt) state.lastSearchedAt = parsed.lastSearchedAt;
+    if (Array.isArray(parsed.searchResults)) state.searchResults = parsed.searchResults;
   } catch {
     /* ignore */
   }
@@ -156,6 +165,10 @@ function save() {
       searchQuery: state.searchQuery,
       searchSources: state.searchSources,
       autoRefresh: state.autoRefresh,
+      autoSaveFeed: state.autoSaveFeed,
+      lastSearchedAt: state.lastSearchedAt,
+      searchResults: state.searchResults,
+      savedAt: new Date().toISOString(),
     }),
   );
 }
@@ -166,7 +179,7 @@ function showToast(msg) {
   setTimeout(() => {
     state.toast = null;
     render();
-  }, 2200);
+  }, 2400);
 }
 
 function filteredJobs() {
@@ -183,32 +196,56 @@ function filteredJobs() {
         j.url.toLowerCase().includes(q)
       );
     })
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    .sort((a, b) =>
+      (b.scrapedAt || b.createdAt || "").localeCompare(a.scrapedAt || a.createdAt || ""),
+    );
 }
 
 function isSaved(url) {
   return state.jobs.some((j) => j.url === url);
 }
 
-function saveJobFromResult(result, silent = false) {
-  if (isSaved(result.url)) {
-    if (!silent) showToast("Already saved");
-    return false;
+function mergeFeedIntoBrowser(results) {
+  let added = 0;
+  const byUrl = new Map(state.jobs.map((j) => [j.url, j]));
+
+  for (const result of results) {
+    const existing = byUrl.get(result.url);
+    if (existing) {
+      existing.title = result.title || existing.title;
+      existing.company = result.company || existing.company;
+      existing.tags = result.tags?.length ? result.tags : existing.tags;
+      existing.source = result.source || existing.source;
+      existing.scrapedAt = result.scrapedAt || new Date().toISOString();
+    } else {
+      const job = {
+        id: uid(),
+        title: result.title,
+        company: result.company || "Unknown",
+        url: result.url,
+        source: result.source || detectSource(result.url),
+        tags: result.tags?.length ? result.tags : suggestTags(result.title),
+        status: "saved",
+        notes: "",
+        createdAt: new Date().toISOString(),
+        scrapedAt: result.scrapedAt || new Date().toISOString(),
+      };
+      state.jobs.unshift(job);
+      byUrl.set(job.url, job);
+      added += 1;
+    }
   }
-  state.jobs.unshift({
-    id: uid(),
-    title: result.title,
-    company: result.company || "Unknown",
-    url: result.url,
-    source: result.source || detectSource(result.url),
-    tags: result.tags?.length ? result.tags : suggestTags(result.title),
-    status: "saved",
-    notes: "",
-    createdAt: new Date().toISOString(),
-  });
+
   save();
-  if (!silent) showToast("Job saved");
-  return true;
+  return { added };
+}
+
+function saveJobFromResult(result, silent = false) {
+  const before = state.jobs.length;
+  mergeFeedIntoBrowser([result]);
+  const added = state.jobs.length > before;
+  if (!silent) showToast(added ? "Saved to browser" : "Already in browser data");
+  return added;
 }
 
 async function applyPrep(job) {
@@ -232,7 +269,7 @@ async function applyPrep(job) {
 }
 
 async function applyPrepFromResult(result) {
-  saveJobFromResult(result, true);
+  mergeFeedIntoBrowser([result]);
   const job = state.jobs.find((j) => j.url === result.url);
   if (job) await applyPrep(job);
 }
@@ -262,19 +299,17 @@ async function runAutoSearch({ silent = false } = {}) {
     if (!silent) showToast("Select at least one source");
     return;
   }
+  if (!window.ApplyHubScraper?.scrapeJobs) {
+    if (!silent) showToast("Scraper failed to load");
+    return;
+  }
 
   state.searchLoading = true;
   state.panel = "search";
   render();
 
   try {
-    const params = new URLSearchParams({
-      q,
-      sources: sources.join(","),
-    });
-    const res = await fetch(`/api/search?${params.toString()}`);
-    if (!res.ok) throw new Error(`Search failed (${res.status})`);
-    const data = await res.json();
+    const data = await window.ApplyHubScraper.scrapeJobs({ query: q, sources });
     state.searchResults = Array.isArray(data.jobs) ? data.jobs : [];
     state.searchErrors = data.errors || {};
     state.searchMeta = {
@@ -282,15 +317,24 @@ async function runAutoSearch({ silent = false } = {}) {
       searchedAt: data.searchedAt || new Date().toISOString(),
     };
     state.lastSearchedAt = state.searchMeta.searchedAt;
-    save();
+
+    let merged = { added: 0 };
+    if (state.autoSaveFeed && state.searchResults.length) {
+      merged = mergeFeedIntoBrowser(state.searchResults);
+    } else {
+      save();
+    }
+
     if (!silent) {
-      showToast(`Found ${state.searchResults.length} active posts`);
+      showToast(
+        `Scraped ${state.searchResults.length} posts · +${merged.added} new in browser`,
+      );
     } else {
       render();
     }
   } catch (err) {
     state.searchErrors = { all: err.message || String(err) };
-    if (!silent) showToast("Auto-search failed — try again");
+    if (!silent) showToast("Scrape failed — try again");
     else render();
   } finally {
     state.searchLoading = false;
@@ -314,8 +358,8 @@ function renderSearchPanel() {
   const errors = Object.entries(state.searchErrors || {});
   return `
     <form class="panel" id="search-form">
-      <h2 class="font-display" style="margin:0 0 0.75rem;font-size:1.25rem">Auto search</h2>
-      <p class="hint">Pulls active listings from OnlineJobs.ph, Indeed, and JobStreet. Save or Apply prep from the results.</p>
+      <h2 class="font-display" style="margin:0 0 0.75rem;font-size:1.25rem">Live scrape</h2>
+      <p class="hint">Standalone scraper pulls live posts from OnlineJobs.ph, Indeed, and JobStreet, then saves them into this browser’s local data.</p>
       <label>
         <span>Keywords</span>
         <input class="field" name="q" value="${escapeHtml(state.searchQuery)}" placeholder="wordpress developer" required />
@@ -339,17 +383,21 @@ function renderSearchPanel() {
           .join("")}
       </div>
       <label class="check auto-refresh">
+        <input type="checkbox" id="auto-save-feed" ${state.autoSaveFeed ? "checked" : ""} />
+        <span>Auto-save scraped jobs to browser storage</span>
+      </label>
+      <label class="check auto-refresh">
         <input type="checkbox" id="auto-refresh" ${state.autoRefresh ? "checked" : ""} />
-        <span>Auto-refresh every 10 minutes</span>
+        <span>Auto-scrape every 10 minutes</span>
       </label>
       <button class="btn-primary" type="submit" ${state.searchLoading ? "disabled" : ""}>
-        ${state.searchLoading ? "Searching…" : "Search active jobs"}
+        ${state.searchLoading ? "Scraping live feeds…" : "Scrape live jobs"}
       </button>
       ${
         state.searchMeta
-          ? `<p class="hint" style="margin-top:0.75rem;margin-bottom:0">Last search: ${escapeHtml(
+          ? `<p class="hint" style="margin-top:0.75rem;margin-bottom:0">Last scrape: ${escapeHtml(
               new Date(state.searchMeta.searchedAt).toLocaleString(),
-            )} · ${state.searchMeta.count} results</p>`
+            )} · ${state.searchMeta.count} results · ${state.jobs.length} stored in browser</p>`
           : ""
       }
       ${
@@ -370,23 +418,23 @@ function renderResults() {
   if (state.searchLoading && !state.searchResults.length) {
     return `
       <div class="empty">
-        <h2 class="font-display">Searching boards…</h2>
-        <p>Checking OnlineJobs.ph, Indeed, and JobStreet for active posts.</p>
+        <h2 class="font-display">Scraping live feeds…</h2>
+        <p>Fetching OnlineJobs.ph, Indeed, and JobStreet, then writing matches into browser storage.</p>
       </div>`;
   }
 
   if (!state.searchResults.length) {
     return `
       <div class="empty">
-        <h2 class="font-display">No search results yet</h2>
-        <p>Run Auto search for WordPress or web developer roles. New matches appear here so you can save or Apply prep in one click.</p>
+        <h2 class="font-display">No scrape results yet</h2>
+        <p>Click <strong>Scrape live jobs</strong> to pull WordPress / web developer posts and save them locally in this browser.</p>
       </div>`;
   }
 
   return `
     <div class="results-toolbar">
-      <p class="font-display" style="margin:0;font-size:1.25rem">${state.searchResults.length} active posts</p>
-      <button type="button" class="btn-secondary" id="save-all-results" style="width:auto">Save all new</button>
+      <p class="font-display" style="margin:0;font-size:1.25rem">${state.searchResults.length} live posts</p>
+      <button type="button" class="btn-secondary" id="save-all-results" style="width:auto">Save all to browser</button>
     </div>
     <ul class="job-list">
       ${state.searchResults
@@ -397,8 +445,10 @@ function renderResults() {
             <div style="min-width:0;flex:1">
               <div class="pills">
                 <span class="source-pill">${SOURCE_LABELS[job.source] || job.source}</span>
-                ${(job.tags || []).map((t) => `<span class="tag-pill">${TAG_LABELS[t] || t}</span>`).join("")}
-                ${saved ? `<span class="tag-pill">Saved</span>` : ""}
+                ${(job.tags || [])
+                  .map((t) => `<span class="tag-pill">${TAG_LABELS[t] || t}</span>`)
+                  .join("")}
+                ${saved ? `<span class="tag-pill">In browser</span>` : ""}
               </div>
               <h3 class="font-display">${escapeHtml(job.title)}</h3>
               <p class="company">${escapeHtml(job.company || "Unknown")}</p>
@@ -420,7 +470,7 @@ function renderSavedSection() {
   const jobs = filteredJobs();
   return `
     <div class="filters">
-      <input class="field" id="query" placeholder="Filter saved jobs…" value="${escapeHtml(state.query)}" />
+      <input class="field" id="query" placeholder="Filter browser-saved jobs…" value="${escapeHtml(state.query)}" />
       <select class="field" id="filter-source">
         <option value="all">All sources</option>
         <option value="onlinejobs">OnlineJobs.ph</option>
@@ -447,8 +497,8 @@ function renderSavedSection() {
       jobs.length === 0
         ? `
       <div class="empty">
-        <h2 class="font-display">No saved jobs</h2>
-        <p>Use Auto search, then Save or Apply prep to track openings here.</p>
+        <h2 class="font-display">Browser storage is empty</h2>
+        <p>Run a live scrape — results are stored in localStorage on this device.</p>
       </div>`
         : `
       <ul class="job-list">
@@ -498,12 +548,12 @@ function render() {
         <div>
           <p class="brand font-display">Apply Hub</p>
           <p class="lede">
-            Auto-search active WordPress and web developer posts from OnlineJobs.ph,
-            Indeed, and JobStreet — then Apply prep in one click.
+            Standalone web app: scrape live WordPress / web developer feeds from
+            OnlineJobs.ph, Indeed, and JobStreet, store them in your browser, then Apply prep in one click.
           </p>
         </div>
         <div class="stats">
-          <span class="stat ink">${stats.total} saved</span>
+          <span class="stat ink">${stats.total} in browser</span>
           <span class="stat">${stats.applied} applied</span>
           <span class="stat accent">${stats.replied} replied</span>
         </div>
@@ -512,7 +562,7 @@ function render() {
     <main>
       <aside>
         <div class="tabs">
-          <button type="button" data-panel="search" class="${state.panel === "search" ? "active" : ""}">Auto search</button>
+          <button type="button" data-panel="search" class="${state.panel === "search" ? "active" : ""}">Live scrape</button>
           <button type="button" data-panel="jobs" class="${state.panel === "jobs" ? "active" : ""}">Manual add</button>
           <button type="button" data-panel="letter" class="${state.panel === "letter" ? "active" : ""}">Cover letter</button>
         </div>
@@ -533,9 +583,9 @@ function render() {
             </label>
             <label>
               <span>Job URL</span>
-              <input class="field" name="url" type="url" placeholder="https://v2.onlinejobs.ph/job/..." required />
+              <input class="field" name="url" type="url" placeholder="https://www.onlinejobs.ph/jobseekers/job/..." required />
             </label>
-            <p class="hint">Source and tags are detected from the URL and title.</p>
+            <p class="hint">Also stored in this browser’s local data.</p>
             <button class="btn-primary" type="submit">Save job</button>
           </form>`
               : `
@@ -552,7 +602,7 @@ function render() {
       </aside>
       <section class="space-y">
         ${state.panel === "search" ? renderResults() : ""}
-        <div class="section-label font-display">Saved applications</div>
+        <div class="section-label font-display">Browser-saved jobs</div>
         ${renderSavedSection()}
       </section>
     </main>
@@ -604,22 +654,28 @@ function bindEvents() {
     });
   });
 
+  const autoSaveFeed = document.getElementById("auto-save-feed");
+  if (autoSaveFeed) {
+    autoSaveFeed.addEventListener("change", () => {
+      state.autoSaveFeed = autoSaveFeed.checked;
+      save();
+    });
+  }
+
   const autoRefresh = document.getElementById("auto-refresh");
   if (autoRefresh) {
     autoRefresh.addEventListener("change", () => {
       state.autoRefresh = autoRefresh.checked;
       save();
       syncAutoRefresh();
-      showToast(state.autoRefresh ? "Auto-refresh on" : "Auto-refresh off");
+      showToast(state.autoRefresh ? "Auto-scrape on" : "Auto-scrape off");
     });
   }
 
   document.getElementById("save-all-results")?.addEventListener("click", () => {
-    let added = 0;
-    for (const result of state.searchResults) {
-      if (saveJobFromResult(result, true)) added += 1;
-    }
-    showToast(added ? `Saved ${added} new jobs` : "No new jobs to save");
+    const { added } = mergeFeedIntoBrowser(state.searchResults);
+    showToast(added ? `Saved ${added} new jobs to browser` : "All results already stored");
+    render();
   });
 
   document.querySelectorAll(".result-save").forEach((btn) => {
@@ -650,19 +706,18 @@ function bindEvents() {
         showToast("Title and URL are required");
         return;
       }
-      state.jobs.unshift({
-        id: uid(),
-        title,
-        company: company || "Unknown",
-        url,
-        source: detectSource(url),
-        tags: suggestTags(title),
-        status: "saved",
-        notes: "",
-        createdAt: new Date().toISOString(),
-      });
-      save();
-      showToast("Job saved");
+      mergeFeedIntoBrowser([
+        {
+          title,
+          company: company || "Unknown",
+          url,
+          source: detectSource(url),
+          tags: suggestTags(title),
+          scrapedAt: new Date().toISOString(),
+        },
+      ]);
+      showToast("Job saved to browser");
+      render();
     });
   }
 
@@ -720,7 +775,7 @@ function bindEvents() {
     btn.addEventListener("click", () => {
       state.jobs = state.jobs.filter((j) => j.id !== btn.getAttribute("data-id"));
       save();
-      showToast("Job removed");
+      showToast("Removed from browser storage");
     });
   });
 
@@ -749,7 +804,6 @@ load();
 render();
 syncAutoRefresh();
 
-// Kick off an initial search so the board isn't empty on first visit.
 if (!state.searchResults.length) {
   runAutoSearch({ silent: true });
 }
