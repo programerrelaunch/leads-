@@ -64,38 +64,39 @@ function looksApplied(block = "") {
 async function fetchText(url, extraHeaders = {}) {
   const headers = {
     "User-Agent": UA,
-    Accept: "text/html,application/xhtml+xml",
+    Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
     ...extraHeaders,
   };
 
+  // On Vercel serverless, direct fetch works — proxies are last resort only.
   const tryUrls = [
-    url,
-    `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    { url, direct: true },
+    { url: `https://corsproxy.io/?${encodeURIComponent(url)}`, direct: false },
+    { url: `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`, direct: false },
   ];
 
   let lastError = null;
   for (const candidate of tryUrls) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(candidate, {
-        headers,
+      const timer = setTimeout(() => controller.abort(), candidate.direct ? 25000 : 15000);
+      const res = await fetch(candidate.url, {
+        headers: candidate.direct ? headers : { Accept: "text/html,*/*" },
         redirect: "follow",
         signal: controller.signal,
       });
       clearTimeout(timer);
       if (!res.ok) {
-        lastError = new Error(`Fetch failed ${res.status} for ${candidate}`);
+        lastError = new Error(`Fetch failed ${res.status}`);
         continue;
       }
       const text = await res.text();
       if (text && text.length > 800) return text;
-      lastError = new Error(`Empty response for ${candidate}`);
+      lastError = new Error("Empty response");
     } catch (err) {
-      lastError = err.name === "AbortError" ? new Error(`Timeout for ${candidate}`) : err;
+      lastError = err.name === "AbortError" ? new Error("Timeout") : err;
     }
   }
   throw lastError || new Error(`Fetch failed for ${url}`);

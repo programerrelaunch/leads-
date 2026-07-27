@@ -51,7 +51,6 @@
     const proxies = [
       (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
       (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-      (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     ];
 
     let lastError = null;
@@ -59,7 +58,7 @@
       const candidate = make(url);
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 22000);
+        const timer = setTimeout(() => controller.abort(), 18000);
         const res = await fetch(candidate, {
           signal: controller.signal,
           headers: { Accept: "text/html,*/*", "X-Requested-With": UA_HINT },
@@ -294,42 +293,40 @@
       ? sources
       : ["onlinejobs", "indeed", "jobstreet"];
 
-    // Prefer authenticated server search when OnlineJobs credentials exist
-    if (email && password) {
-      try {
-        const data = await scrapeViaApi({
-          query,
-          sources: list,
-          email,
-          password,
-          knownAppliedUrls,
-          skipApplied,
-        });
-        return {
-          query,
-          count: data.count || (data.jobs || []).length,
-          jobs: (data.jobs || []).map((j) => ({
-            ...j,
-            scrapedAt: new Date().toISOString(),
-          })),
-          appliedDetected: data.appliedDetected || [],
-          skippedApplied: data.skippedApplied || 0,
-          errors: data.errors || {},
-          authenticated: Boolean(data.authenticated),
-          searchedAt: data.searchedAt || new Date().toISOString(),
-        };
-      } catch (err) {
-        // fall through to browser scrape
-        var authError = err.message || String(err);
-      }
+    // Always scrape via server first (direct fetches, no flaky CORS proxies).
+    try {
+      const data = await scrapeViaApi({
+        query,
+        sources: list,
+        email,
+        password,
+        knownAppliedUrls,
+        skipApplied,
+      });
+      return {
+        query,
+        count: data.count || (data.jobs || []).length,
+        jobs: (data.jobs || []).map((j) => ({
+          ...j,
+          scrapedAt: new Date().toISOString(),
+        })),
+        appliedDetected: data.appliedDetected || [],
+        skippedApplied: data.skippedApplied || 0,
+        errors: data.errors || {},
+        authenticated: Boolean(data.authenticated),
+        searchedAt: data.searchedAt || new Date().toISOString(),
+        via: "server",
+      };
+    } catch (err) {
+      var serverError = err.message || String(err);
     }
 
+    // Browser fallback only if server search failed
     const results = await Promise.all(list.map((s) => searchSource(s, query)));
     const jobs = [];
     const appliedDetected = [];
     const seen = new Set();
-    const errors = {};
-    if (authError) errors.onlinejobs_auth = authError;
+    const errors = { server: serverError };
 
     for (const result of results) {
       if (result.error) errors[result.source] = result.error;
@@ -350,31 +347,6 @@
       }
     }
 
-    // Server fallback without auth if browser scrape is thin
-    if (jobs.length < 3) {
-      try {
-        const data = await scrapeViaApi({
-          query,
-          sources: list,
-          email: email || "",
-          password: password || "",
-          knownAppliedUrls,
-          skipApplied,
-        });
-        for (const job of data.jobs || []) {
-          if (seen.has(job.url)) continue;
-          seen.add(job.url);
-          jobs.push({ ...job, scrapedAt: new Date().toISOString() });
-        }
-        for (const job of data.appliedDetected || []) {
-          appliedDetected.push(job);
-        }
-        Object.assign(errors, data.errors || {});
-      } catch {
-        /* ignore */
-      }
-    }
-
     return {
       query,
       count: jobs.length,
@@ -384,6 +356,7 @@
       errors,
       authenticated: false,
       searchedAt: new Date().toISOString(),
+      via: "browser",
     };
   }
 

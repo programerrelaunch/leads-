@@ -707,10 +707,12 @@ function renderSearchPanel() {
       ${
         errors.length
           ? `<ul class="error-list">${errors
-              .map(
-                ([src, msg]) =>
-                  `<li><strong>${escapeHtml(SOURCE_LABELS[src] || src)}</strong>: ${escapeHtml(msg)}</li>`,
-              )
+              .map(([src, msg]) => {
+                const short = String(msg || "")
+                  .replace(/https?:\/\/[^\s]+/g, "(url)")
+                  .slice(0, 120);
+                return `<li><strong>${escapeHtml(SOURCE_LABELS[src] || src)}</strong>: ${escapeHtml(short)}</li>`;
+              })
               .join("")}</ul>`
           : ""
       }
