@@ -183,18 +183,24 @@ async function searchSource(source, query) {
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "");
-      const candidates = [
+      const candidates = [];
+      if (/wordpress/.test(slug)) candidates.push("https://ph.jobstreet.com/wordpress-jobs");
+      if (/web|developer|fullstack|full-stack/.test(slug)) {
+        candidates.push("https://ph.jobstreet.com/web-developer-jobs");
+      }
+      candidates.push(
         `https://ph.jobstreet.com/${slug}-jobs`,
-        `https://ph.jobstreet.com/${encodeURIComponent(query)}-jobs`,
         "https://ph.jobstreet.com/wordpress-jobs",
         "https://ph.jobstreet.com/web-developer-jobs",
-      ];
+      );
       let html = "";
       let lastError = null;
-      for (const url of candidates) {
+      for (const pageUrl of [...new Set(candidates)]) {
         try {
-          html = await fetchText(url);
-          if (html.includes('data-automation="jobTitle"')) break;
+          html = await fetchText(pageUrl);
+          if (html.includes('data-automation="jobTitle"') || html.includes("/job/")) {
+            break;
+          }
         } catch (err) {
           lastError = err;
         }
@@ -206,6 +212,22 @@ async function searchSource(source, query) {
   } catch (err) {
     return { source, jobs: [], error: err.message || String(err) };
   }
+}
+
+function normalizeQuery(raw) {
+  let q = String(Array.isArray(raw) ? raw[0] : raw || "wordpress developer").trim();
+  q = q.replace(/\+/g, " ");
+  for (let i = 0; i < 3; i += 1) {
+    if (!/%[0-9a-f]{2}/i.test(q)) break;
+    try {
+      const next = decodeURIComponent(q);
+      if (next === q) break;
+      q = next;
+    } catch {
+      break;
+    }
+  }
+  return q.trim() || "wordpress developer";
 }
 
 module.exports = async function handler(req, res) {
@@ -224,13 +246,14 @@ module.exports = async function handler(req, res) {
   }
 
   const url = new URL(req.url, "http://localhost");
-  let query = (url.searchParams.get("q") || "wordpress developer").trim();
-  try {
-    query = decodeURIComponent(query.replace(/\+/g, " ")).trim();
-  } catch {
-    /* already decoded */
-  }
-  const sourcesParam = (url.searchParams.get("sources") || "onlinejobs,indeed,jobstreet")
+  const query = normalizeQuery(
+    (req.query && req.query.q) || url.searchParams.get("q") || "wordpress developer",
+  );
+  const sourcesRaw =
+    (req.query && req.query.sources) ||
+    url.searchParams.get("sources") ||
+    "onlinejobs,indeed,jobstreet";
+  const sourcesParam = String(sourcesRaw)
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
