@@ -4,13 +4,13 @@ Personal job application tracker for WordPress / web developer openings.
 
 ## What it does
 
-- Save job URLs from OnlineJobs.ph, Indeed, and JobStreet
-- Auto-detect source + suggest tags from the title
-- Store your cover letter locally (preloaded with Ryan's letter)
-- **Apply prep**: copies the letter to clipboard and opens the job page
+- **Auto search** active WordPress / web developer posts from OnlineJobs.ph, Indeed, and JobStreet
+- Optional auto-refresh every 10 minutes
+- Save results or **Apply prep** (copies cover letter + opens the job page)
+- Manual URL add still available
 - Track status: Saved → Applied → Replied → Closed
 
-Data stays in your browser (`localStorage`). Nothing is scraped or auto-submitted.
+Search runs through `/api/search` (Vercel serverless). Application submit still happens on the job site itself.
 
 ## Quick start (no install)
 
