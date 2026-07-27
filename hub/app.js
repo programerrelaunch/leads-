@@ -715,7 +715,7 @@ function renderResults() {
       <p class="font-display" style="margin:0;font-size:1.25rem">${state.searchResults.length} live posts</p>
       <div class="toolbar-actions">
         <button type="button" class="btn-secondary" id="save-all-results" style="width:auto">Save all to browser</button>
-        <button type="button" class="btn-primary" id="apply-all-results" style="width:auto" ${getApplyAllCandidates("results").length ? "" : "disabled"}>
+        <button type="button" class="btn-primary" id="apply-all-results" style="width:auto">
           Apply to all (${getApplyAllCandidates("results").length})
         </button>
       </div>
@@ -756,7 +756,7 @@ function renderSavedSection() {
   return `
     <div class="results-toolbar saved-toolbar">
       <p class="hint" style="margin:0">${pending.length} ready to apply (status: Saved)</p>
-      <button type="button" class="btn-primary" id="apply-all-saved" style="width:auto" ${pending.length ? "" : "disabled"}>
+      <button type="button" class="btn-primary" id="apply-all-saved" style="width:auto">
         Apply to all (${pending.length})
       </button>
     </div>
