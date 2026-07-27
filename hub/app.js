@@ -248,9 +248,11 @@ function saveJobFromResult(result, silent = false) {
   return added;
 }
 
-async function applyPrep(job) {
+async function applyPrep(job, { quiet = false } = {}) {
   try {
-    await navigator.clipboard.writeText(state.coverLetter);
+    if (!quiet) {
+      await navigator.clipboard.writeText(state.coverLetter);
+    }
     window.open(job.url, "_blank", "noopener,noreferrer");
     state.jobs = state.jobs.map((j) =>
       j.id === job.id
@@ -262,9 +264,9 @@ async function applyPrep(job) {
         : j,
     );
     save();
-    showToast("Cover letter copied — job opened");
+    if (!quiet) showToast("Cover letter copied — job opened");
   } catch {
-    showToast("Could not copy — check clipboard permission");
+    if (!quiet) showToast("Could not copy — check clipboard permission");
   }
 }
 
@@ -272,6 +274,68 @@ async function applyPrepFromResult(result) {
   mergeFeedIntoBrowser([result]);
   const job = state.jobs.find((j) => j.url === result.url);
   if (job) await applyPrep(job);
+}
+
+/**
+ * One-click apply prep for many jobs: copies the same cover letter once,
+ * opens each listing, and marks them applied in browser storage.
+ * (You still paste/submit on each site — boards block true auto-submit.)
+ */
+async function applyToAll(jobs, { confirmLarge = true } = {}) {
+  const list = (jobs || []).filter((j) => j && j.url);
+  if (!list.length) {
+    showToast("No jobs to apply to");
+    return;
+  }
+
+  if (confirmLarge && list.length > 12) {
+    const ok = window.confirm(
+      `Apply prep to ${list.length} jobs with the same cover letter?\n\nThis will copy your letter once and open ${list.length} tabs. Paste the letter on each application form.`,
+    );
+    if (!ok) return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(state.coverLetter);
+  } catch {
+    showToast("Could not copy cover letter — check clipboard permission");
+    return;
+  }
+
+  // Ensure scrape results exist in browser storage first
+  mergeFeedIntoBrowser(
+    list.map((j) => ({
+      title: j.title,
+      company: j.company,
+      url: j.url,
+      source: j.source,
+      tags: j.tags,
+      scrapedAt: j.scrapedAt || new Date().toISOString(),
+    })),
+  );
+
+  const urls = [...new Set(list.map((j) => j.url))];
+  let opened = 0;
+  for (const url of urls) {
+    const win = window.open(url, "_blank", "noopener,noreferrer");
+    if (win) opened += 1;
+  }
+
+  const now = new Date().toISOString();
+  state.jobs = state.jobs.map((j) =>
+    urls.includes(j.url)
+      ? {
+          ...j,
+          status: j.status === "saved" || j.status === "applied" ? "applied" : j.status,
+          appliedAt: j.appliedAt || now,
+        }
+      : j,
+  );
+  save();
+  showToast(
+    `Cover letter copied · opened ${opened}/${urls.length} jobs — paste the same letter on each form`,
+  );
+  render();
 }
 
 function escapeHtml(str) {
@@ -434,7 +498,10 @@ function renderResults() {
   return `
     <div class="results-toolbar">
       <p class="font-display" style="margin:0;font-size:1.25rem">${state.searchResults.length} live posts</p>
-      <button type="button" class="btn-secondary" id="save-all-results" style="width:auto">Save all to browser</button>
+      <div class="toolbar-actions">
+        <button type="button" class="btn-secondary" id="save-all-results" style="width:auto">Save all to browser</button>
+        <button type="button" class="btn-primary" id="apply-all-results" style="width:auto">Apply to all</button>
+      </div>
     </div>
     <ul class="job-list">
       ${state.searchResults
@@ -468,7 +535,14 @@ function renderResults() {
 
 function renderSavedSection() {
   const jobs = filteredJobs();
+  const pending = jobs.filter((j) => j.status === "saved");
   return `
+    <div class="results-toolbar saved-toolbar">
+      <p class="hint" style="margin:0">${pending.length} ready to apply (status: Saved)</p>
+      <button type="button" class="btn-primary" id="apply-all-saved" style="width:auto" ${pending.length ? "" : "disabled"}>
+        Apply to all (${pending.length})
+      </button>
+    </div>
     <div class="filters">
       <input class="field" id="query" placeholder="Filter browser-saved jobs…" value="${escapeHtml(state.query)}" />
       <select class="field" id="filter-source">
@@ -676,6 +750,15 @@ function bindEvents() {
     const { added } = mergeFeedIntoBrowser(state.searchResults);
     showToast(added ? `Saved ${added} new jobs to browser` : "All results already stored");
     render();
+  });
+
+  document.getElementById("apply-all-results")?.addEventListener("click", () => {
+    applyToAll(state.searchResults);
+  });
+
+  document.getElementById("apply-all-saved")?.addEventListener("click", () => {
+    const pending = filteredJobs().filter((j) => j.status === "saved");
+    applyToAll(pending);
   });
 
   document.querySelectorAll(".result-save").forEach((btn) => {

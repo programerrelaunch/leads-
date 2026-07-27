@@ -472,6 +472,20 @@ textarea.field {
   margin-bottom: 0.75rem;
 }
 
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.saved-toolbar {
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 2px;
+}
+
 .section-label {
   margin: 1.25rem 0 0.65rem;
   font-size: 1.35rem;
