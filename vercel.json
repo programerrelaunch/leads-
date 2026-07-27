@@ -2,12 +2,17 @@
   "version": 2,
   "builds": [
     { "src": "api/search.js", "use": "@vercel/node" },
-    { "src": "hub/**", "use": "@vercel/static" }
+    { "src": "hub/index.html", "use": "@vercel/static" },
+    { "src": "hub/app.js", "use": "@vercel/static" },
+    { "src": "hub/scraper.js", "use": "@vercel/static" },
+    { "src": "hub/styles.css", "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/search", "dest": "api/search.js" },
-    { "src": "/", "dest": "hub/index.html" },
-    { "src": "/(.+)", "dest": "hub/$1" }
-  ],
-  "cleanUrls": true
+    { "src": "/api/search", "dest": "/api/search.js" },
+    { "src": "/app.js", "dest": "/hub/app.js" },
+    { "src": "/scraper.js", "dest": "/hub/scraper.js" },
+    { "src": "/styles.css", "dest": "/hub/styles.css" },
+    { "src": "/", "dest": "/hub/index.html" },
+    { "src": "/(.*)", "dest": "/hub/$1" }
+  ]
 }
